@@ -13,8 +13,113 @@
 # include "base64.h"
 # include "decode_video2.h"
 
+pthread_cond_t buffer_full = PTHREAD_COND_INITIALIZER;
+pthread_cond_t buffer_empty = PTHREAD_COND_INITIALIZER;
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+
 pthread_mutex_t wait_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t wait_cond = PTHREAD_COND_INITIALIZER;
+
+typedef struct RgbDataBuffer{
+
+    int consumer_ptr;
+    int producer_ptr;
+    AVFrame* buffer[50];
+
+}RgbDataBuffer;
+
+typedef struct WriteArgs{
+
+    int *decoded_cnt;
+    int *rendered_cnt;
+    int height;
+    int width;
+    RgbDataBuffer frame_buffer;
+}WriteArgs;
+
+void putFrame(AVFrame *frame, RgbDataBuffer *data){
+
+
+    while(data->buffer[data->producer_ptr] != NULL){
+
+        usleep(100);
+    }
+
+    data->buffer[data->producer_ptr] = frame;
+    data->producer_ptr = (data->producer_ptr + 1) % 50;
+}
+
+void *writeLoop(void *args){
+
+    WriteArgs *wargs = args;
+
+    void *ptr;
+    uint8_t *shm_dest_ptr;
+    char path[16];
+    int shm_fd;
+
+    int size = wargs->height * wargs->width * 3;
+    
+    size_t row_bytes = wargs->width * 3;
+
+    while(true){
+
+        snprintf( path, 16, "/frame%d", *wargs->decoded_cnt % 50);
+
+        shm_fd = shm_open(path, O_CREAT | O_RDWR, 0666);
+
+        if (shm_fd == -1) {
+            fprintf(stdout, "shm_open failed\n");
+            return ptr;
+        }
+
+        ftruncate(shm_fd, size);
+
+        ptr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
+
+        if (ptr == MAP_FAILED) {
+            fprintf(stdout, "shm_open failed\n");
+            return ptr;
+        }
+
+        shm_dest_ptr = (uint8_t *)ptr; 
+
+        pthread_mutex_lock(&wait_mutex);
+        while (wargs->frame_buffer.buffer[wargs->frame_buffer.consumer_ptr] == NULL){
+
+            pthread_cond_wait(&wait_cond, &wait_mutex);
+        }
+
+        pthread_mutex_unlock(&wait_mutex);
+
+        AVFrame* rgb_frame = wargs->frame_buffer.buffer[wargs->frame_buffer.consumer_ptr];
+
+        while (true) {
+
+            int decoded = __atomic_load_n(wargs->decoded_cnt, __ATOMIC_ACQUIRE);
+            int rendered = __atomic_load_n(wargs->rendered_cnt, __ATOMIC_ACQUIRE);
+
+            if (decoded - rendered < 40) {
+                break;
+            }
+        }
+
+        for (int y = 0; y < rgb_frame->height; y++) {
+
+            uint8_t *src_ptr = rgb_frame->data[0] + y * rgb_frame->linesize[0];
+            memcpy(shm_dest_ptr, src_ptr, row_bytes);
+
+            shm_dest_ptr += row_bytes;
+        }
+
+        munmap(ptr, rgb_frame->height * rgb_frame->width * 3);
+        // free(rgb_frame);
+        wargs->frame_buffer.buffer[wargs->frame_buffer.consumer_ptr] = NULL;
+        wargs->frame_buffer.consumer_ptr = (wargs->frame_buffer.consumer_ptr + 1) % 50;
+        close(shm_fd);
+        increment(wargs->decoded_cnt);
+    }
+}
 
 void writeFrame(AVFrame *rgb_frame, int *decoded_cnt, int *rendered_cnt){
 
@@ -53,7 +158,7 @@ void writeFrame(AVFrame *rgb_frame, int *decoded_cnt, int *rendered_cnt){
             break;
         }
 
-        usleep(0);
+        usleep(500000);
     }
 
 
@@ -70,18 +175,19 @@ void writeFrame(AVFrame *rgb_frame, int *decoded_cnt, int *rendered_cnt){
     increment(decoded_cnt);
 }
 
-void decode(AVCodecContext *dec_ctx, AVFrame *frame, struct SwsContext *sws_ctx, AVFrame *rgb_frame , int *rendered_cnt, int *decoded_cnt){
+void decode(AVCodecContext *dec_ctx, AVFrame *frame, struct SwsContext *sws_ctx, AVFrame *rgb_frame , int *rendered_cnt, int *decoded_cnt, WriteArgs *wargs){
 
     int ret;
 
     // FILE *err_file = fopen("logs/c_error.log", "w");
-    // FILE *a = fopen("logs/c.log", "a");
+    FILE *a = fopen("logs/c.log", "a");
 
     while (true) {
 
         ret = avcodec_receive_frame(dec_ctx, frame);
 
         if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            // writerArgs->state = 2;
             break;
         }
 
@@ -90,7 +196,7 @@ void decode(AVCodecContext *dec_ctx, AVFrame *frame, struct SwsContext *sws_ctx,
             return;
         }
 
-        // clock_t st = clock();
+        clock_t st = clock();
 
         ret = sws_scale( sws_ctx, (const uint8_t * const *)frame->data, frame->linesize, 0, frame->height, rgb_frame->data, rgb_frame->linesize);
 
@@ -99,14 +205,16 @@ void decode(AVCodecContext *dec_ctx, AVFrame *frame, struct SwsContext *sws_ctx,
             return;
         }
 
-        writeFrame(rgb_frame, decoded_cnt, rendered_cnt);
-        // clock_t end = clock();
+        putFrame(rgb_frame, &wargs->frame_buffer);
+        pthread_cond_signal(&wait_cond);
+        // writeFrame(rgb_frame, decoded_cnt, rendered_cnt);
+        clock_t end = clock();
 
-        // fprintf(a, "%f ms\n", ((double)(end - st)) / CLOCKS_PER_SEC * 1000);
+        fprintf(a, "%f ms\n", ((double)(end - st)) / CLOCKS_PER_SEC * 1000);
 
     }
 
-    // fclose(a);
+    fclose(a);
     // fclose(err_file);
 }
 
@@ -148,6 +256,14 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
     AVFrame *frame = NULL;
     AVFrame *rgb_frame = NULL;
     struct SwsContext *sws_ctx = NULL;
+
+    WriteArgs wargs = {0};
+    wargs.decoded_cnt = decoded_cnt;
+    wargs.rendered_cnt = rendered_cnt;
+    wargs.frame_buffer.consumer_ptr = 0;
+    wargs.frame_buffer.producer_ptr = 0;
+
+    pthread_t thread;
 
     int ret;
     int video_stream = -1;
@@ -235,6 +351,8 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
     rgb_frame->format = AV_PIX_FMT_RGB24;
     rgb_frame->width  = terminal_width;
     rgb_frame->height = terminal_height;
+    wargs.width  = terminal_width;
+    wargs.height = terminal_height;
 
     ret = av_frame_get_buffer(rgb_frame, 32);
 
@@ -244,7 +362,13 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
 
     sws_ctx = sws_getContext( stream->codecpar->width, stream->codecpar->height, stream->codecpar->format, rgb_frame->width, rgb_frame->height, AV_PIX_FMT_RGB24, SWS_BILINEAR, NULL, NULL, NULL);
 
+    pthread_create(&thread, NULL, writeLoop, &wargs);
+
     while ((ret = av_read_frame(fmt_ctx, packet)) >= 0) {
+
+        FILE *b = fopen("logs/c2.log", "a");
+
+        clock_t start = clock();
 
         if (packet->stream_index != video_stream) {
             av_packet_unref(packet);
@@ -258,14 +382,22 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
             break;
         }
 
-        decode(dec_ctx, frame, sws_ctx, rgb_frame, rendered_cnt, decoded_cnt);
+        clock_t end = clock();
+
+        fprintf(b, "%fms\n",(double)(end - start) / CLOCKS_PER_SEC * 1000 );
+
+        fclose(b);
+
+        decode(dec_ctx, frame, sws_ctx, rgb_frame, rendered_cnt, decoded_cnt, &wargs);
 
         av_packet_unref(packet);
     }
 
+    pthread_join(thread, NULL);
+
     avcodec_send_packet(dec_ctx, NULL);
 
-    decode(dec_ctx, frame, sws_ctx, rgb_frame, rendered_cnt, decoded_cnt);
+    decode(dec_ctx, frame, sws_ctx, rgb_frame, rendered_cnt, decoded_cnt, &wargs);
 
     av_frame_free(&frame);
     av_frame_free(&rgb_frame);

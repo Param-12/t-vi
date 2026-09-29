@@ -1,0 +1,72 @@
+# ==============================================================================
+# C/C++ Artifacts
+# ==============================================================================
+# Compiled Object files
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic Libraries
+*.so
+*.dylib
+*.dll
+
+# Compiled Static Libraries
+*.a
+*.lib
+
+# Common C Executable formats & debug structures
+*.out
+*.exe
+*.app
+*.dXY/
+*.dSYM/
+
+# ==============================================================================
+# Go (Golang) Artifacts
+# ==============================================================================
+# Binaries for programs and plugins
+*.exe~
+
+# Test binaries built via `go test -c`
+*.test
+
+# Code coverage profiles and test artifacts
+coverage.*
+*.coverprofile
+profile.cov
+
+# Go workspace files (unless you explicitly want to share local workspaces)
+go.work
+go.work.sum
+
+# Go local environment files
+.env
+
+# Dependency directory (Uncomment if you do NOT want to commit vendored code)
+# vendor/
+
+# Custom Go Build Outputs
+# If your project builds a specific binary name, explicitly add it below:
+# /my-app-name
+
+# ==============================================================================
+# Operating System & IDE Garbage
+# ==============================================================================
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# JetBrains (GoLand / CLion)
+.idea/
+
+# Visual Studio Code
+.vscode/
+/ohio
+logs/

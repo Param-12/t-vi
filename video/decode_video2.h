@@ -10,3 +10,5 @@ void incrementRenderCnt(int *val);
 
 void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_width, int terminal_height);
 
+void frameLoop2(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_width, int terminal_height);
+

@@ -1,6 +1,6 @@
 package main
 
-// # include "video/decode_video2.h"
+// # include "video/decode_video3.h"
 import "C"
 
 import (

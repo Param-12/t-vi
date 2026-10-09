@@ -40,11 +40,10 @@ typedef struct WriterArgs{
 
 typedef struct ScaleArgs{
 
-    int decodedFrames;
-    int scaledFrames;
     int nextFrame;
     WriterArgs *wargs;
     SwsContextArgs sws_args;
+    uint8_t buffer_state; // 0 -> empty, 1 -> filled
     AVFrame *frame_buffer[8];
 
 }ScaleArgs;
@@ -135,7 +134,7 @@ void *writerThread(void *args){
 
     for (;;){
 
-        index = (*wargs->decoded_cnt) % 8;
+        index = __atomic_load_n(wargs->decoded_cnt, __ATOMIC_ACQUIRE) % 8;
 
         while((__atomic_load_n(&wargs->occupiedIndices, __ATOMIC_ACQUIRE) & (1 << index)) == 0){
 
@@ -143,8 +142,8 @@ void *writerThread(void *args){
         }
 
         writeFrame(wargs->rgb_frames[index], wargs->decoded_cnt, wargs->rendered_cnt);
-        __atomic_and_fetch(&wargs->occupiedIndices, ~(1 << index), __ATOMIC_RELEASE);
-        // wargs->occupiedIndices &= ~(1 << index);
+        // __atomic_and_fetch(&wargs->occupiedIndices, ~(1 << index), __ATOMIC_RELEASE);
+        wargs->occupiedIndices &= ~(1 << index);
     }
 }
 
@@ -159,14 +158,14 @@ void *scalingThread(void *args){
 
     for (;;){
 
-        index = __atomic_fetch_add(&(sargs->nextFrame), 1, __ATOMIC_SEQ_CST) ;
+        index = __atomic_fetch_add(&(sargs->nextFrame), 1, __ATOMIC_RELEASE);
 
-        while(index >= __atomic_load_n(&sargs->decodedFrames, __ATOMIC_ACQUIRE)){
+        index %= 8;
+
+        while((__atomic_load_n(&sargs->buffer_state, __ATOMIC_ACQUIRE) & (1 << index)) == 0){
 
             usleep(100);
         }
-
-        index %= 8;
 
         while((__atomic_load_n(&sargs->wargs->occupiedIndices, __ATOMIC_ACQUIRE) & (1  << index)) != 0){
 
@@ -180,7 +179,7 @@ void *scalingThread(void *args){
             return NULL;
         }
 
-        sargs->scaledFrames++;
+        __atomic_and_fetch(&sargs->buffer_state, ~(1 << index) , __ATOMIC_RELEASE);
 
         __atomic_or_fetch(&sargs->wargs->occupiedIndices, (1 << index), __ATOMIC_RELEASE);
         // sargs->wargs->occupiedIndices |= (1 << index);
@@ -200,7 +199,6 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
 
     AVPacket *packet = NULL;
 
-    int scaledFrames = 0;
     pthread_t thread;
     pthread_t thread1;
     pthread_t thread2;
@@ -208,6 +206,8 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
 
     int ret;
     int video_stream = -1;
+
+    int decodedFrames = 0;
 
     WriterArgs wargs = {0};
     ScaleArgs sargs = {0};
@@ -336,11 +336,13 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
 
         while (1) {
 
-            while(__atomic_load_n(&sargs.decodedFrames, __ATOMIC_ACQUIRE) - __atomic_load_n(&sargs.scaledFrames, __ATOMIC_ACQUIRE) > 6){
+            while((__atomic_load_n(&sargs.buffer_state, __ATOMIC_ACQUIRE) & (1 << (decodedFrames % 8))) != 0){
+
                 usleep(100);
             }
 
-            ret = avcodec_receive_frame(dec_ctx, sargs.frame_buffer[__atomic_load_n(&sargs.decodedFrames, __ATOMIC_ACQUIRE) % 8]);
+            // ret = avcodec_receive_frame(dec_ctx, sargs.frame_buffer[__atomic_load_n(&sargs.decodedFrames, __ATOMIC_ACQUIRE) % 8]);
+            ret = avcodec_receive_frame(dec_ctx, sargs.frame_buffer[decodedFrames % 8]);
 
             if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
                 break;
@@ -351,7 +353,8 @@ void frameLoop(char *path, int *rendered_cnt, int *decoded_cnt, int terminal_wid
                 return;
             }
 
-            increment(&sargs.decodedFrames);
+            __atomic_fetch_or(&sargs.buffer_state, (1 << (decodedFrames % 8)), __ATOMIC_RELEASE);
+            decodedFrames++;
         }
         
         // decoding end
